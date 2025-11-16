@@ -1,0 +1,540 @@
+---
+title: "Stroke Prediction"
+output: html_document
+date: "2025-10-29"
+---
+Problem Statement:
+  Strokes are a leading cause of death and long-term disability. Early identification of individuals at elevated risk can significantly improve prevention and intervention outcomes. The goal of this project is to build a predictive model that identifies individuals who are at risk of having a stroke. I will base This model on demographic, lifestyle, and health-related predictors. The prevalence of stroke in the data set is low, around 6%, so the primary goal is to maximize sensitivity (true-positive). Because this data is of past events, we will interpret the model predicting an individual has had a stroke as indicating elevated stroke risk.
+  
+Data Description:
+  The data set contains information on 5,110 individuals with the features age, gender, hypertension status, heart disease status, marital status, work type, residence type, average glucose level, BMI, and smoking status. The target variable, stroke, is a binary classification (0/1). Stoke is rare in the data set, creating a significant class imbalance that must be addressed during modeling.
+  
+Data Cleaning and Pre-processing:
+  * Removal of Children and Individuals who have never worked:
+      Children were removed from the data set. Children are not an at risk group, and I believed their inclusion in the data set was inappropriate for the purpose of predicting stroke. After removing children under 18, the never_worked level of the work_type feature was left with only 5 observational units. I also removed these individuals because the model cannot learn about a feature level with so few instances. These changes reduced the data set to 4249 observational units. 
+      
+  * Handling of missing BMI values:
+      BMI had missing values. Analysis showed that individuals with missing BMI differed significantly from others in glucose levels and stroke rates. This indicated that the missingness was not random. Rather than dropping these cases, BMI was transformed into a categorical variable consisting of the levels missing, normal, overweight, and obese. These allowed for missingness to become a meaningful category.
+      
+  * Train-test split:
+      The cleaned data set was split into a training set (0.80) and a test set for modeling and final evaluation. 
+    
+Exploratory Data Analysis:
+  Stroke prevalence: Around 6% of individuals experienced a stroke, confirming a heavy class imbalance. 
+  
+  Age: Stroke patients are significantly older on average. An ANOVA analysis indicated a strong association between age and stroke.
+  
+  Glucose Levels: Individuals with higher average glucose levels have higher stroke rates. Significant differences in average glucose levels were found between BMI groups using an ANOVA analysis.
+  
+  Categorical Features: After performing Chi-squared tests, hypertension and heart disease were found to strongly correlate with stroke. Work type and smoking status also showed meaningful differences across stroke outcomes, with the formerly smoked level of smoking status in particular having a correlation with stroke. Marital status also showed a correlation. 
+  
+Baseline Model: Logistic Regression 
+  A weighted logistic regression model was used as a baseline to address class imbalance. Predictors included age, hypertension, heart disease, marital status, work type, residence type, glucose, BMI category, and smoking status.
+  Performance:
+    AUC ≈ 0.72
+    Sensitivity ≈ 0.79
+    Specificity ≈ 0.78
+    
+  Logistic regression provides an a good baseline, but it is limited by its linear assumptions. Two of the strongest predictiors, age and glucose, are nonlinear. This reduces performance.
+  
+Advanced Model: XGBoost
+  XGBoost was selected as the advanced model because it handles nonlinear interactions, and is generally considred a good model for tabular medical data sets.
+  Performance:
+    AUC ≈ 0.82
+    Sensitivity ≈ 0.88
+    Specificity ≈ 0.65
+  
+  This represents a substantial improvement over logistic regression. The model correctly indetifies 88% of stroke cases, making it well suited for risk screening where missing a high risk patient is more costly than generating false alarms. Feature importance analysis identified age, average glucose level, hypertension, BMI category, and smoking status as key drivers of stroke risk.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# For this data science project I will take the stroke prediction data set from Kaggle and create a model that can accurately predict whether or not a person is at risk for a stroke. We will consider a person at risk for a stroke if the model predicts that they had a stroke.
+```
+
+```{r}
+library(tidyverse)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(caret)
+library(pROC)
+library(mgcv)
+library(xgboost)
+```
+
+EDA
+```{r}
+df <- read.csv("healthcare-dataset-stroke-data.csv")
+
+glimpse(df)
+
+# 5110 observations with 11 input features.
+
+## id:                 int
+## gender:             character       -> Should be factor
+## age:                double
+## hypertension:       int (0/1)       -> Should be factor
+## heart_disease:      int (0/1)       -> Should be factor
+## ever_married:       character       -> Should be factor
+## work_type:          character       -> Should be factor
+## Residence_type:     character       -> Should be factor
+## avg_glucose_level:  double
+## bmi:                character       -> Should be numeric
+## smoking_status:     character       -> Should be factor
+
+## stroke:             int (0/1)       -> Should be factor
+
+df$gender         <- factor(df$gender)
+df$hypertension   <- factor(df$hypertension)
+df$heart_disease  <- factor(df$heart_disease)
+df$ever_married   <- factor(df$ever_married)
+df$work_type      <- factor(df$work_type)
+df$Residence_type <- factor(df$Residence_type)
+df$smoking_status <- factor(df$smoking_status)
+df$stroke         <- factor(df$stroke)
+
+```
+
+```{r}
+summary(df)
+
+# Notable:
+## age: The minimum age is 0.08. That has to be an error. I need to explore age and find out how many observational units are problematic
+## hypertension: 9.7 % of the observational units have hypertension. 
+## heart_disease: 5.4% have heart disease
+## stroke: 4.9% have had a stroke. Only 5 percent of the target class is positive. This could cause issues during training. 
+## avg_glucose_level: The average glucose level is at a normal level for an average adult. This taken into account with the mean age, it seems like the data set is representative of average adults. 
+```
+
+```{r} 
+#gender
+summary(df$gender)
+table(df$gender)
+
+other <- df %>% filter(gender =="Other")
+other
+## Other could be an interesting factor level if there were more instances, but since there is only one we will either have to delete the observational unit or convert 
+## to Female or Male. A quick Google search suggests that those assigned female at birth are more likely to identify as other, we will convert this unit to female
+
+df[3117, "gender"] <- "Female"
+
+tab <- table(df$stroke, df$gender)
+tab <- tab[, colSums(tab) > 0]
+chisq.test(tab)
+## stroke and gender are independent
+```
+
+```{r}
+#age
+summary(df$age)
+hist(df$age, breaks=64)
+
+## Upon further investigation, the 0.08 minimum age was not a mistake, but children being included in the data set. I may end up converting age to a factor, and decimals 
+## are an issue. Apart from that issue, there is also the fact that children are not an at risk group for stroke, and there inclusion will affect the accuracy of the model.
+## I believe the best course of action would be to remove the children all together, but I need to by which marker I am removing them. I could remove everyone with the occupation level of "children" or I could remove everyone under 18. I do not yet know if those completely overlap. 
+
+children <- df %>% filter(work_type == "children")
+eighteen <- df %>% filter(age < 18)
+
+## "children" =/= < 18
+## I will remove everyone under the age of 18.
+
+df <- df[df$age >= 18, ]
+
+## New observational unit count is 4254. 5110-4254 = 856
+## We removed 856 observational units. 
+
+## summary before:
+##   Min.   1st Qu.  Median   Mean    3rd Qu.   Max. 
+##   0.08   25.00    45.00    43.23   61.00     82.00 
+
+##  
+##   Min.   1st Qu.  Median   Mean    3rd Qu.   Max. 
+##   18.0   36.0     50.5     50.2    64.0      82.0 
+
+## This is a good range and distribution 
+
+anova_model <- aov(age ~ stroke, data=df)
+summary(anova_model)
+## stroke and age are not independent.
+
+```
+
+```{r}
+# work_type, residence, ever_married
+
+table(df$work_type)
+N_Worked <- df %>% filter(work_type=="Never_worked")
+
+## After removing children:
+## Govt_job   Never_worked   Private    Self-employed 
+## 651        5              2791       807 
+
+## Never_worked only has 5 instances. This is too few for our model to learn on, and at this level it will only be noise. I will remove those observational units.
+
+df <- df %>% filter(work_type != "Never_worked")
+
+
+table(df$Residence_type)
+## There is a roughly even ratio of Rural to Urban.
+
+table(df$ever_married)
+## There 3.74 individuals who have been married at least once to ever individual who has never been married. This makes sense. 
+
+tab <- table(df$stroke, df$work_type)
+tab <- tab[, colSums(tab) > 0]
+chisq.test(tab)
+## work_type and stroke are not independent
+
+tab <- table(df$stroke, df$Residence_type)
+tab <- tab[, colSums(tab) > 0]
+chisq.test(tab)
+##stroke and Residence_type are independent
+
+tab <- table(df$stroke, df$ever_married)
+tab <- tab[, colSums(tab) > 0]
+chisq.test(tab)
+##stroke and ever_married are not independent
+```
+
+```{r}
+#avg_glucose_level 
+
+summary(df$avg_glucose_level)
+sum(is.na(df$avg_glucose_level))
+
+plot(df$avg_glucose_level)
+hist(df$avg_glucose_level, breaks=20)
+
+## The majority of instances are concentrated around 75-95, then there is a rapid fall over, before another concentration forms around 190-240.
+# I will use rpart to find the dividing line and to discover if the division will help us to predict strokes. 
+
+explore_tree <- rpart(
+  stroke ~ avg_glucose_level,
+  data=df,
+  method="class",
+  control=rpart.control(
+    cp = 0.0004,
+    minsplit = 5,
+    minbucket = 2,
+    maxdepth = 2
+  )
+)
+explore_tree <- snip.rpart(explore_tree, toss = 3)
+
+rpart.plot(explore_tree, type=3, extra=101)
+
+ggplot(df, aes(avg_glucose_level, as.numeric(stroke) - 1)) +
+  geom_jitter(height = 0.02, alpha = 0.2) +
+  geom_smooth(method = "loess", se = TRUE, color = "steelblue") +
+  labs(y = "Stroke Probability", x = "Avg Glucose Level")
+
+## 162.045 is a dividing line for avg_glucose_level. Below 162 there is a 4.4% chance of stroke. Above 162 there is a 14% chance of stroke. That means you are more 3 times as likely to have a stoke when your avg_glucose_level is above 162. 
+
+##         Negative    Positive    Percentage
+##  <162    3459        158         4.36
+##  >162    548         89          13.97
+```
+
+```{r}
+#bmi
+
+##------------------Histogram
+summary(df$bmi)
+bmi_subSet <- df %>% filter(bmi != "N/A")
+bmi_subSet$bmi <- as.numeric(bmi_subSet$bmi)
+hist(bmi_subSet$bmi, breaks=30, xlab = "BMI", main="BMI Distribution")
+
+##------------------Number of N/A
+sum(df$bmi == "N/A", na.rm = TRUE)
+bmi_subSet <- df %>% filter(bmi == "N/A")
+
+##-----------------Box plot
+df$bmi_group <- ifelse(df$bmi == "N/A", "Missing", "Present")
+
+boxplot(avg_glucose_level ~ bmi_group, data = df,
+        main = "Glucose Levels by BMI Data Availability",
+        xlab = "BMI Group", 
+        ylab = "Average Glucose Level")
+
+##------------------T-test and anova analysis
+t.test(avg_glucose_level ~ bmi_group, data = df)
+
+anova_test <- aov(avg_glucose_level ~ bmi_group, data = df)
+summary(anova_test)
+
+## Glucose levels between the two data sets are noticeably different. After running an anova analysis and t-test, I know this difference is not due to chance. This means that the bmi data is not missing at random. There is some systemic reason why the glucose levels are different, and why bmi was left unreported. For this reason I cannot remove this subset without affecting biasing my analysis. 
+
+##--Stroke Proportion--
+table(df$stroke, df$bmi_group)
+prop.table(table(df$stroke, df$bmi_group), margin = 2)
+
+## 21.5% of people missing a bmi value suffered from a stroke. This means that missing a bmi value might be the strongest predictor of a stroke.  
+
+df <- df %>% select(-bmi_group)
+
+```
+
+```{r}
+## I do not believe that other features will be good indicators of bmi, so imputation is not a good choice. I will create a new feature called bmi_category which will convert bmi to a factor and include N/A.
+
+summary(df$bmi_category)
+
+df$bmi_category <- suppressWarnings(
+  ifelse(df$bmi == "N/A", "Missing",
+    ifelse(as.numeric(df$bmi) < 25, "Normal",
+      ifelse(as.numeric(df$bmi) < 30, "Overweight", "Obese")
+    )))
+
+##------------------Box Plot
+boxplot(avg_glucose_level~ bmi_category, data=df)
+
+##--Stroke Proportion--
+table(df$stroke, df$bmi_category)
+prop.table(table(df$stroke, df$bmi_category), margin = 2)
+
+```
+
+```{r}
+#Smoking_status
+
+summary(df$smoking_status) #860 unknown is an issue
+
+##----------------Chisq test to see if smoking status is statistically significant 
+tab <- table(df$stroke, df$smoking_status)
+chisq.test(tab)
+
+##----------------Stroke rates by smoking status
+df %>%
+  mutate(stroke_num = as.numeric(stroke) - 1) %>%
+  group_by(smoking_status) %>%
+  summarise(stroke_rate = mean(stroke_num)) %>%
+  ggplot(aes(smoking_status, stroke_rate)) +
+  geom_col(fill="steelblue") +
+  labs(y="Stroke Rate", x="Smoking Status",
+       title="Stroke Rate by Smoking Category")
+
+## Smokes, never smoked, and unknown are very similar. 
+
+df_smoke <- subset(df, smoking_status %in% c("never smoked", "smokes", "Unknown"))
+tab <- table(df_smoke$stroke, df_smoke$smoking_status)
+tab <- tab[, colSums(tab) > 0]
+chisq.test(tab)
+
+## Since unknown is almost identical to smokes and never smoked I will leave it in. There is no need to further reduce my sample size, and Unknown will definitely be encountered in real applications of any model I make, so at this point it would be best to leave it in. 
+```
+
+```{r}
+#hypertension
+table(df$hypertension)
+## Before removing children, around 9.7% had hypertension.
+## After removing children, around 11.7% had hypertension.
+
+tab <- table(df$stroke, df$hypertension)
+chisq.test(tab)
+## Hypertension and stroke are not independent
+
+```
+
+```{r}
+#heart_disease
+table(df$heart_disease)
+## Before removing children, 5.4% had heart disease. 
+## After removing children, 6.5% had heart disease.
+
+tab <- table(df$stroke, df$heart_disease)
+chisq.test(tab)
+## Heart_disease and stroke are not independent.
+```
+
+```{r}
+#stroke
+table(df$stroke)
+## Before removing children, 4.9% previously suffered a stroke.
+## After removing children, 5.8% previously suffered a stroke.
+```
+
+Building the model:
+
+```{r}
+## At this point we know that heart_disease, age, hypertension, ever_married, work_type, avg_glucose_level, bmi, smoking_status, and bmi_category are not independent with stroke. We will build our model using these predictors. Because we are predicting a binary outcome, I will begin with logistic regression. 
+
+set.seed(123) 
+
+train_index <- createDataPartition(df$stroke, p = 0.8, list = FALSE)
+
+train <- df[train_index, ]
+test  <- df[-train_index, ]
+```
+
+Logistic Regression
+```{r}
+model_logistic <- glm(stroke ~ age + hypertension + ever_married + work_type + avg_glucose_level + 
+                      bmi_category + smoking_status ,
+                      data = train,
+                      family=binomial,
+                      weights=ifelse(train$stroke == 1,30,1))
+summary(model_logistic)
+
+test$prob <- predict(model_logistic, test, type="response")
+
+## Tuning threshold
+roc_obj <- roc(test$stroke, test$prob)
+coords(roc_obj, "best", ret=c("threshold", "sensitivity", "specificity"))
+opt_t <- coords(roc_obj, "best", ret = "threshold")
+opt_t <- as.numeric(opt_t) 
+opt_t
+test$pred_opt <- ifelse(test$prob >= opt_t, 1, 0)
+
+table(Actual = test$stroke, Predicted = test$pred)
+confusionMatrix(
+  factor(test$pred_opt, levels=c(0,1)),
+  factor(test$stroke, levels=c(0,1))
+)
+
+## After adjusting the the threshold and weights we achieved
+#              Sensitivity : 0.7850          
+#              Specificity : 0.7755 
+#              Kappa: 0.2205
+
+#-------------ROC chart
+fpr <- 1 - roc_obj$specificities     # False Positive Rate
+tpr <- roc_obj$sensitivities         # True Positive Rate
+
+plot(
+  fpr, tpr,
+  type = "l",
+  col = "steelblue",
+  lwd = 3,
+  xlim = c(0, 1),
+  ylim = c(0, 1),
+  xlab = "False Positive Rate (1 - Specificity)",
+  ylab = "True Positive Rate (Sensitivity)",
+  main = "ROC Curve for Stroke Logistic Regression"
+)
+# Add diagonal baseline (random classifier)
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+```
+
+
+```{r}
+# XGBoost
+
+# y are the labels (0/1)
+y_train <- as.numeric(as.character(train$stroke))
+y_test  <- as.numeric(as.character(test$stroke))
+
+# Design matrices for XGBoost (no intercept)
+X_train <- model.matrix(
+  stroke ~ age + I(age^2) +
+    hypertension + heart_disease +
+    gender + ever_married +
+    work_type + Residence_type +
+    avg_glucose_level +
+    bmi_category + smoking_status,
+  data = train
+)[, -1]
+
+X_test <- model.matrix(
+  stroke ~ age + I(age^2) +
+    hypertension + heart_disease +
+    gender + ever_married +
+    work_type + Residence_type +
+    avg_glucose_level +
+    bmi_category + smoking_status,
+  data = test
+)[, -1]
+
+pos_weight <- sum(y_train == 0) / sum(y_train == 1)  
+
+params <- list(
+  objective        = "binary:logistic",
+  eval_metric      = "auc",         
+  eta              = 0.05,
+  max_depth        = 4,
+  subsample        = 0.8,
+  colsample_bytree = 0.8,
+  scale_pos_weight = pos_weight
+)
+
+cv <- xgb.cv(
+  params  = params,
+  data    = X_train,
+  label   = y_train,   
+  nrounds = 2000,
+  nfold   = 5,
+  stratified = TRUE,
+  early_stopping_rounds = 50,
+  verbose = 0
+)
+
+best_n <- cv$best_iteration
+best_n
+
+model_xgb <- xgboost(
+  data  = X_train,
+  label = y_train,
+  nrounds = best_n,
+  objective        = "binary:logistic",
+  eval_metric      = "auc",
+  eta              = 0.05,
+  max_depth        = 4,
+  subsample        = 0.8,
+  colsample_bytree = 0.8,
+  scale_pos_weight = pos_weight,
+  verbose = 0
+)
+
+predictions <- predict(model_xgb, X_test)
+
+roc_obj <- roc(y_test, predictions)
+auc(roc_obj)   # just to see how good it is overall
+
+# Threshold that maximizes (sensitivity + specificity - 1)
+best <- coords(roc_obj, "best",
+               ret = c("threshold", "sensitivity", "specificity"))
+best
+
+best_t <- as.numeric(best["threshold"])
+best_t
+
+predicted_classes <- ifelse(predictions > best_t, 1, 0)
+
+cm <- confusionMatrix(
+  factor(predicted_classes, levels = c(0, 1)),
+  factor(y_test,           levels = c(0, 1)),
+  positive = "1"
+)
+
+cm
+auc(roc_obj)
+
+
+```
+
+Logistic Regression (weighted):
+  AUC ≈ 0.72
+  Sensitivity ≈ 0.79        -> 79% of stroke patients are correctly identified.
+  Specificity ≈ 0.78        -> 78% of non-stroke victims are correctly identified.
+  
+XGBoost:
+  AUC ≈ 0.82
+  Sensitivity ≈ 0.88        -> 88% of stroke patients are correctly identified.
+  Specificity ≈ 0.65        -> 65% of non-stroke victims are correctly identified.
+
+
+```{r}
+#final
+model_final <- model_xgb
+
+importance <- xgb.importance(
+  feature_names = colnames(X_train),
+  model = model_final
+)
+
+xgb.plot.importance(importance, col="steelblue", main="Feature Imporantance for XGBoost Model")
+
+```
